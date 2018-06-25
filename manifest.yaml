@@ -1,0 +1,72 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mwc-example
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mwc-example
+  namespace: mwc-example
+  labels:
+    name: mwc-example
+spec:
+  ports:
+  - name: webhook # optional
+    port: 443
+  selector:
+    name: mwc-example 
+---
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: mwc-example
+  namespace: mwc-example
+  labels:
+    name: mwc-example
+spec:
+  replicas: 1
+  template:
+    metadata:
+      name: mwc-example
+      labels:
+        name: mwc-example
+    spec:
+      containers:
+        - name: webhook
+          image: jasonrichardsmith/mwc-example:0.5
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-tls-cert-file=/etc/webhook/certs/cert.pem"
+            - "-tls-private-key-file=/etc/webhook/certs/key.pem"
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /etc/webhook/certs
+              readOnly: true
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: mwc-example
+---
+apiVersion: admissionregistration.k8s.io/v1beta1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: mwc-example
+webhooks:
+  - name: mwc-example.jasonrichardsmith.com
+    clientConfig:
+      service:
+        name: mwc-example
+        namespace: mwc-example
+        path: "/pods"
+      caBundle: "${CA_BUNDLE}"
+    rules:
+      - operations: ["*"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+    failurePolicy: Fail
+    namespaceSelector:
+      matchLabels:
+        mwc-example: enabled
