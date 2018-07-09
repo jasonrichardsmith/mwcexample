@@ -1,4 +1,4 @@
-VERSION="0.5"
+VERSION="0.1"
 build:
 	CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o webhook .
 	docker build --no-cache -t jasonrichardsmith/mwc-example:${VERSION} .

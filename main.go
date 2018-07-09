@@ -3,25 +3,40 @@ package main
 import (
 	"crypto/tls"
 	"encoding/json"
-	"flag"
-	"fmt"
 	"io/ioutil"
 	"net/http"
-	"strings"
 
-	"github.com/golang/glog"
+	log "github.com/Sirupsen/logrus"
 	"k8s.io/api/admission/v1beta1"
 	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 )
 
-var scheme = runtime.NewScheme()
-var codecs = serializer.NewCodecFactory(scheme)
+var (
+	// This is our change to the Pod
+	labelPatchExistingLabels = `[{"op":"add","path":"/metadata/labels/thisisanewlabel", "value":"hello"}]`
+	labelPatchNoLabels       = `[{"op":"add","path":"/metadata/labels", "value":{"thisisanewlabel":"hello"}}]`
+
+	// This is so we can securely talk to the api
+	config = Config{
+		CertFile: "/etc/webhook/certs/cert.pem",
+		KeyFile:  "/etc/webhook/certs/key.pem",
+	}
+
+	// Read https://godoc.org/k8s.io/apimachinery/pkg/runtime#NewScheme
+	scheme = runtime.NewScheme()
+
+	// Read https://godoc.org/k8s.io/apimachinery/pkg/runtime/serializer#NewCodecFactory
+	codecs = serializer.NewCodecFactory(scheme)
+)
+
+func addToScheme(scheme *runtime.Scheme) {
+	corev1.AddToScheme(scheme)
+	admissionregistrationv1beta1.AddToScheme(scheme)
+}
 
 // Config contains the server (the webhook) cert and key.
 type Config struct {
@@ -29,14 +44,7 @@ type Config struct {
 	KeyFile  string
 }
 
-func (c *Config) addFlags() {
-	flag.StringVar(&c.CertFile, "tls-cert-file", c.CertFile, ""+
-		"File containing the default x509 Certificate for HTTPS. (CA cert, if any, concatenated "+
-		"after server cert).")
-	flag.StringVar(&c.KeyFile, "tls-private-key-file", c.KeyFile, ""+
-		"File containing the default x509 private key matching --tls-cert-file.")
-}
-
+// This is just a helper function for errors
 func toAdmissionResponse(err error) *v1beta1.AdmissionResponse {
 	return &v1beta1.AdmissionResponse{
 		Result: &metav1.Status{
@@ -45,175 +53,46 @@ func toAdmissionResponse(err error) *v1beta1.AdmissionResponse {
 	}
 }
 
-// only allow pods to pull images from specific registry.
-func admitPods(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
-	glog.V(2).Info("admitting pods")
-	podResource := metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
-	if ar.Request.Resource != podResource {
-		err := fmt.Errorf("expect resource to be %s", podResource)
-		glog.Error(err)
-		return toAdmissionResponse(err)
-	}
+// This is our main logic to mutate
+func mutatePods(receivedAdmissionReview v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
+	log.Info("adding label to pod")
 
-	raw := ar.Request.Object.Raw
+	// The pod definition comes as raw bytes, so we will deserialize into the Pod object.
+	raw := receivedAdmissionReview.Request.Object.Raw
 	pod := corev1.Pod{}
 	deserializer := codecs.UniversalDeserializer()
 	if _, _, err := deserializer.Decode(raw, nil, &pod); err != nil {
-		glog.Error(err)
+		log.Error(err)
 		return toAdmissionResponse(err)
 	}
-	reviewResponse := v1beta1.AdmissionResponse{}
-	reviewResponse.Allowed = true
 
-	var msg string
-	if v, ok := pod.Labels["webhook-e2e-test"]; ok {
-		if v == "webhook-disallow" {
-			reviewResponse.Allowed = false
-			msg = msg + "the pod contains unwanted label; "
-		}
-		if v == "wait-forever" {
-			reviewResponse.Allowed = false
-			msg = msg + "the pod response should not be sent; "
-			<-make(chan int) // Sleep forever - no one sends to this channel
-		}
-	}
-	for _, container := range pod.Spec.Containers {
-		if strings.Contains(container.Name, "webhook-disallow") {
-			reviewResponse.Allowed = false
-			msg = msg + "the pod contains unwanted container name; "
+	reviewResponse := v1beta1.AdmissionResponse{}
+
+	// We are not admitting pods, just mutating them, so set to true
+	reviewResponse.Allowed = true
+	// if the key exists
+	if val, ok := pod.ObjectMeta.Annotations["mwc-example.jasonrichardsmith.com.exclude"]; ok {
+		log.Info("annotation exists")
+		// if the key is true we will exclude
+		if val == "true" {
+			log.Info("excluded due to annotation")
+			return &reviewResponse
 		}
 	}
-	if !reviewResponse.Allowed {
-		reviewResponse.Result = &metav1.Status{Message: strings.TrimSpace(msg)}
+	if len(pod.ObjectMeta.Labels) > 0 {
+		reviewResponse.Patch = []byte(labelPatchExistingLabels)
+	} else {
+		reviewResponse.Patch = []byte(labelPatchNoLabels)
 	}
-	return &reviewResponse
-}
-
-func mutatePods(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
-	glog.V(2).Info("mutating pods")
-	podResource := metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
-	if ar.Request.Resource != podResource {
-		glog.Errorf("expect resource to be %s", podResource)
-		return nil
-	}
-
-	raw := ar.Request.Object.Raw
-	pod := corev1.Pod{}
-	deserializer := codecs.UniversalDeserializer()
-	if _, _, err := deserializer.Decode(raw, nil, &pod); err != nil {
-		glog.Error(err)
-		return toAdmissionResponse(err)
-	}
-	reviewResponse := v1beta1.AdmissionResponse{}
-	reviewResponse.Allowed = true
-	return &reviewResponse
-}
-
-// deny configmaps with specific key-value pair.
-func admitConfigMaps(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
-	glog.V(2).Info("admitting configmaps")
-	configMapResource := metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
-	if ar.Request.Resource != configMapResource {
-		glog.Errorf("expect resource to be %s", configMapResource)
-		return nil
-	}
-
-	raw := ar.Request.Object.Raw
-	configmap := corev1.ConfigMap{}
-	deserializer := codecs.UniversalDeserializer()
-	if _, _, err := deserializer.Decode(raw, nil, &configmap); err != nil {
-		glog.Error(err)
-		return toAdmissionResponse(err)
-	}
-	reviewResponse := v1beta1.AdmissionResponse{}
-	reviewResponse.Allowed = true
-	for k, v := range configmap.Data {
-		if k == "webhook-e2e-test" && v == "webhook-disallow" {
-			reviewResponse.Allowed = false
-			reviewResponse.Result = &metav1.Status{
-				Reason: "the configmap contains unwanted key and value",
-			}
-		}
-	}
-	return &reviewResponse
-}
-
-func mutateConfigmaps(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
-	glog.V(2).Info("mutating configmaps")
-	configMapResource := metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
-	if ar.Request.Resource != configMapResource {
-		glog.Errorf("expect resource to be %s", configMapResource)
-		return nil
-	}
-
-	raw := ar.Request.Object.Raw
-	configmap := corev1.ConfigMap{}
-	deserializer := codecs.UniversalDeserializer()
-	if _, _, err := deserializer.Decode(raw, nil, &configmap); err != nil {
-		glog.Error(err)
-		return toAdmissionResponse(err)
-	}
-	reviewResponse := v1beta1.AdmissionResponse{}
-	reviewResponse.Allowed = true
-
 	pt := v1beta1.PatchTypeJSONPatch
 	reviewResponse.PatchType = &pt
-
+	log.Printf("added patch %v", string(reviewResponse.Patch))
 	return &reviewResponse
 }
 
-func mutateCRD(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
-	glog.V(2).Info("mutating crd")
-	cr := struct {
-		metav1.ObjectMeta
-		Data map[string]string
-	}{}
-
-	raw := ar.Request.Object.Raw
-	err := json.Unmarshal(raw, &cr)
-	if err != nil {
-		glog.Error(err)
-		return toAdmissionResponse(err)
-	}
-
-	reviewResponse := v1beta1.AdmissionResponse{}
-	reviewResponse.Allowed = true
-
-	pt := v1beta1.PatchTypeJSONPatch
-	reviewResponse.PatchType = &pt
-	return &reviewResponse
-}
-
-func admitCRD(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
-	glog.V(2).Info("admitting crd")
-	cr := struct {
-		metav1.ObjectMeta
-		Data map[string]string
-	}{}
-
-	raw := ar.Request.Object.Raw
-	err := json.Unmarshal(raw, &cr)
-	if err != nil {
-		glog.Error(err)
-		return toAdmissionResponse(err)
-	}
-
-	reviewResponse := v1beta1.AdmissionResponse{}
-	reviewResponse.Allowed = true
-	for k, v := range cr.Data {
-		if k == "webhook-e2e-test" && v == "webhook-disallow" {
-			reviewResponse.Allowed = false
-			reviewResponse.Result = &metav1.Status{
-				Reason: "the custom resource contains unwanted data",
-			}
-		}
-	}
-	return &reviewResponse
-}
-
-type admitFunc func(v1beta1.AdmissionReview) *v1beta1.AdmissionResponse
-
-func serve(w http.ResponseWriter, r *http.Request, admit admitFunc) {
+// This will just be a wrapper for the http request and response, e2e tests have a
+// better level of abstraction
+func serve(w http.ResponseWriter, r *http.Request) {
 	var body []byte
 	if r.Body != nil {
 		if data, err := ioutil.ReadAll(r.Body); err == nil {
@@ -224,110 +103,70 @@ func serve(w http.ResponseWriter, r *http.Request, admit admitFunc) {
 	// verify the content type is accurate
 	contentType := r.Header.Get("Content-Type")
 	if contentType != "application/json" {
-		glog.Errorf("contentType=%s, expect application/json", contentType)
+		log.Errorf("contentType=%s, expect application/json", contentType)
 		return
 	}
 
-	var reviewResponse *v1beta1.AdmissionResponse
-	ar := v1beta1.AdmissionReview{}
+	// This is what we send back it will be nested in a returned AdmissionReview
+	var admissionResponse *v1beta1.AdmissionResponse
+
+	// We will attempt to deserialize what was sent into the AdmissionReview
+	receivedAdmissionReview := v1beta1.AdmissionReview{}
+
 	deserializer := codecs.UniversalDeserializer()
-	if _, _, err := deserializer.Decode(body, nil, &ar); err != nil {
-		glog.Error(err)
-		reviewResponse = toAdmissionResponse(err)
+	if _, _, err := deserializer.Decode(body, nil, &receivedAdmissionReview); err != nil {
+		log.Error(err)
+		admissionResponse = toAdmissionResponse(err)
 	} else {
-		reviewResponse = admit(ar)
+		// Success set with AdmissionResponse returned from our mutator
+		admissionResponse = mutatePods(receivedAdmissionReview)
+	}
+	// This will be the final returned review
+	returnedAdmissionReview := v1beta1.AdmissionReview{}
+
+	// We got a return from our mutator
+	if admissionResponse != nil {
+		// set the response in the returned review
+		returnedAdmissionReview.Response = admissionResponse
+		// reference the original request
+		returnedAdmissionReview.Response.UID = receivedAdmissionReview.Request.UID
 	}
 
-	response := v1beta1.AdmissionReview{}
-	if reviewResponse != nil {
-		response.Response = reviewResponse
-		response.Response.UID = ar.Request.UID
-	}
-	// reset the Object and OldObject, they are not needed in a response.
-	ar.Request.Object = runtime.RawExtension{}
-	ar.Request.OldObject = runtime.RawExtension{}
+	// to json and write to responsewriter
+	responseInBytes, err := json.Marshal(returnedAdmissionReview)
+	log.Info(string(responseInBytes))
 
-	resp, err := json.Marshal(response)
 	if err != nil {
-		glog.Error(err)
+		log.Error(err)
+		return
 	}
-	if _, err := w.Write(resp); err != nil {
-		glog.Error(err)
-	}
-}
-
-func servePods(w http.ResponseWriter, r *http.Request) {
-	serve(w, r, admitPods)
-}
-
-func serveMutatePods(w http.ResponseWriter, r *http.Request) {
-	serve(w, r, mutatePods)
-}
-
-func serveConfigmaps(w http.ResponseWriter, r *http.Request) {
-	serve(w, r, admitConfigMaps)
-}
-
-func serveMutateConfigmaps(w http.ResponseWriter, r *http.Request) {
-	serve(w, r, mutateConfigmaps)
-}
-
-func serveCRD(w http.ResponseWriter, r *http.Request) {
-	serve(w, r, admitCRD)
-}
-
-func serveMutateCRD(w http.ResponseWriter, r *http.Request) {
-	serve(w, r, mutateCRD)
-}
-
-// Get a clientset with in-cluster config.
-func getClient() *kubernetes.Clientset {
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		glog.Fatal(err)
-	}
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		glog.Fatal(err)
-	}
-	return clientset
-}
-
-func configTLS(config Config, clientset *kubernetes.Clientset) *tls.Config {
-	sCert, err := tls.LoadX509KeyPair(config.CertFile, config.KeyFile)
-	if err != nil {
-		glog.Fatal(err)
-	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{sCert},
-		// TODO: uses mutual tls after we agree on what cert the apiserver should use.
-		// ClientAuth:   tls.RequireAndVerifyClientCert,
+	log.Info("Writing response")
+	if _, err := w.Write(responseInBytes); err != nil {
+		log.Error(err)
 	}
 }
 
 func init() {
+
+	// intiate the deserializer
 	addToScheme(scheme)
 }
 
-func addToScheme(scheme *runtime.Scheme) {
-	corev1.AddToScheme(scheme)
-	admissionregistrationv1beta1.AddToScheme(scheme)
-}
 func main() {
-	var config Config
-	config.addFlags()
-	flag.Parse()
+	// Load our cert files
+	sCert, err := tls.LoadX509KeyPair(config.CertFile, config.KeyFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{sCert},
+	}
 
-	http.HandleFunc("/pods", servePods)
-	http.HandleFunc("/mutating-pods", serveMutatePods)
-	http.HandleFunc("/configmaps", serveConfigmaps)
-	http.HandleFunc("/mutating-configmaps", serveMutateConfigmaps)
-	http.HandleFunc("/crd", serveCRD)
-	http.HandleFunc("/mutating-crd", serveMutateCRD)
-	clientset := getClient()
+	// serve it up
+	http.HandleFunc("/mutating-pods", serve)
 	server := &http.Server{
 		Addr:      ":443",
-		TLSConfig: configTLS(config, clientset),
+		TLSConfig: tlsConfig,
 	}
 	server.ListenAndServeTLS("", "")
 }

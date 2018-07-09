@@ -11,6 +11,8 @@ kind: Pod
 metadata:
   name:      pause
   namespace: mwc-test
+  labels:
+    test: label
 spec:
   containers:
     - name:  pause

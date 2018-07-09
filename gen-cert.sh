@@ -1,27 +1,11 @@
 #!/bin/bash
-while [[ $# -gt 0 ]]; do
-    case ${1} in
-        --service)
-            service="$2"
-            shift
-            ;;
-        --secret)
-            secret="$2"
-            shift
-            ;;
-        --namespace)
-            namespace="$2"
-            shift
-            ;;
-    esac
-    shift
-done
+title="mwc-example"
 
-[ -z ${service} ] && service=sidecar-injector-webhook-svc
-[ -z ${secret} ] && secret=sidecar-injector-webhook-certs
-[ -z ${namespace} ] && namespace=default
+[ -z ${title} ] && service=sidecar-injector-webhook-svc
+[ -z ${title} ] && secret=sidecar-injector-webhook-certs
+[ -z ${title} ] && namespace=default
 
-csrName=${service}.${namespace}
+csrName=${title}.${title}
 tmpdir=$(mktemp -d)
 echo "creating certs in tmpdir ${tmpdir} "
 
@@ -36,13 +20,13 @@ keyUsage = nonRepudiation, digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
 subjectAltName = @alt_names
 [alt_names]
-DNS.1 = ${service}
-DNS.2 = ${service}.${namespace}
-DNS.3 = ${service}.${namespace}.svc
+DNS.1 = ${title}
+DNS.2 = ${title}.${title}
+DNS.3 = ${title}.${title}.svc
 EOF
 
 openssl genrsa -out ${tmpdir}/server-key.pem 2048
-openssl req -new -key ${tmpdir}/server-key.pem -subj "/CN=${service}.${namespace}.svc" -out ${tmpdir}/server.csr -config ${tmpdir}/csr.conf
+openssl req -new -key ${tmpdir}/server-key.pem -subj "/CN=${title}.${title}.svc" -out ${tmpdir}/server.csr -config ${tmpdir}/csr.conf
 
 # clean-up any previously created CSR for our service. Ignore errors if not present.
 kubectl delete csr ${csrName} 2>/dev/null || true
@@ -89,8 +73,8 @@ echo ${serverCert} | openssl base64 -d -A -out ${tmpdir}/server-cert.pem
 
 
 # create the secret with CA cert and server cert/key
-kubectl create secret generic ${secret} \
+kubectl create secret generic ${title} \
         --from-file=key.pem=${tmpdir}/server-key.pem \
         --from-file=cert.pem=${tmpdir}/server-cert.pem \
         --dry-run -o yaml |
-    kubectl -n ${namespace} apply -f -
+    kubectl -n ${title} apply -f -
