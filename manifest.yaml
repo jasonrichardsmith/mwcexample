@@ -8,7 +8,7 @@ metadata:
     name: mwc-example
 spec:
   ports:
-  - name: webhook # optional
+  - name: webhook
     port: 443
   selector:
     name: mwc-example 
