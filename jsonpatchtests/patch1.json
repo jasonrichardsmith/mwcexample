@@ -1,3 +1,3 @@
 [
-    {"op": "add", "path": "/metadata/labels/test2", "value": "test2"}
+    {"op": "add", "path": "/metadata/labels/thisisanewlabel", "value": "hello"}
 ]
