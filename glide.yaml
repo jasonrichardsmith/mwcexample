@@ -1,0 +1,13 @@
+package: github.com/jasonrichardsmith/mwcexample
+import:
+- package: github.com/Sirupsen/logrus
+- package: k8s.io/api
+  subpackages:
+  - admission/v1beta1
+  - admissionregistration/v1beta1
+  - core/v1
+- package: k8s.io/apimachinery
+  subpackages:
+  - pkg/apis/meta/v1
+  - pkg/runtime
+  - pkg/runtime/serializer

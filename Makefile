@@ -1,6 +1,13 @@
+.DEFAULT_GOAL := build
 VERSION="0.1"
+REPO="jasonrichardsmith/mwc-example"
+
 build:
-	CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o webhook .
 	docker build --no-cache -t jasonrichardsmith/mwc-example:${VERSION} .
-	docker push jasonrichardsmith/mwc-example:${VERSION}
-	rm -rf webhook
+	
+minikube: minikubecontext build
+
+minikubecontext:
+	eval $(minikube docker-env)
+push:
+	docker push ${REPO}:${VERSION}
